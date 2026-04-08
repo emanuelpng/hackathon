@@ -10,7 +10,8 @@ RUN apk add --no-cache \
     oniguruma-dev \
     libxml2-dev \
     mysql-client \
-    nodejs npm
+    nodejs npm \
+    gettext
 
 # PHP extensions
 RUN docker-php-ext-configure gd --with-jpeg --with-webp \
@@ -44,8 +45,8 @@ RUN composer install --no-dev --optimize-autoloader --no-interaction
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache \
     && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
-# Nginx config
-COPY docker/nginx.conf /etc/nginx/nginx.conf
+# Nginx config template (envsubst fills in $PORT at startup)
+COPY docker/nginx.conf /etc/nginx/nginx.conf.template
 
 # Supervisord config
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
