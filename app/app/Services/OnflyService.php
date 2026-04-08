@@ -604,6 +604,30 @@ class OnflyService
         ], 86400);
     }
 
+    // ── Manual token storage ─────────────────────────────────────
+
+    /**
+     * Persist tokens provided manually (e.g. pasted from get_tokens.js output).
+     */
+    public function storeTokensManually(string $refreshToken, ?string $gatewayRefreshToken): void
+    {
+        $this->dbTokenPut('refresh_token', $refreshToken);
+        Cache::put('onfly_refresh_token', $refreshToken, 86400 * 30);
+
+        if ($gatewayRefreshToken) {
+            $this->dbTokenPut('gateway_refresh_token', $gatewayRefreshToken);
+            Cache::put('onfly_gateway_refresh_token', $gatewayRefreshToken, 86400 * 30);
+        }
+
+        // Clear stale access tokens so next request gets fresh ones
+        Cache::forget('onfly_api_token');
+        Cache::forget('onfly_gateway_token');
+
+        $this->markAuthHealthy();
+
+        Log::info('Onfly: tokens atualizados manualmente.');
+    }
+
     // ── OAuth login flow ─────────────────────────────────────────
 
     /**

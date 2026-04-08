@@ -7,5 +7,5 @@ use Illuminate\Support\Facades\Route;
 Route::get('/', fn () => redirect('/dashboard'));
 Route::get('/dashboard', [DashboardController::class, 'index']);
 
-Route::get('/auth/onfly', [AuthController::class, 'redirectToOnfly'])->name('auth.onfly.redirect');
-Route::get('/auth/onfly/callback', [AuthController::class, 'handleCallback'])->name('auth.onfly.callback');
+Route::get('/auth/tokens', [AuthController::class, 'showTokenForm'])->name('auth.tokens.form');
+Route::post('/auth/tokens', [AuthController::class, 'storeTokens'])->name('auth.tokens.store');

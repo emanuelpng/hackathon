@@ -27,8 +27,8 @@
         <a href="/dashboard" class="text-gray-500 text-xs hover:text-gray-300">↻ refresh</a>
     </div>
     <div class="flex items-center gap-4">
-        <a href="/auth/onfly" class="text-blue-400 text-xs hover:text-blue-300 border border-blue-800 hover:border-blue-600 rounded px-2 py-0.5 transition">
-            Re-auth Onfly
+        <a href="/auth/tokens" class="text-blue-400 text-xs hover:text-blue-300 border border-blue-800 hover:border-blue-600 rounded px-2 py-0.5 transition">
+            Atualizar tokens
         </a>
         <span class="text-gray-500 text-xs">{{ now()->format('d/m/Y H:i:s') }}</span>
     </div>
@@ -58,11 +58,11 @@
             <div class="text-red-600 text-xs mt-1">Falhou em: {{ $authStatus['broken_at'] }}</div>
             @endif
             <div class="mt-3">
-                <a href="/auth/onfly"
+                <a href="/auth/tokens"
                    class="inline-block bg-blue-600 hover:bg-blue-500 text-white font-bold px-5 py-2 rounded text-sm transition">
-                    Fazer login na Onfly
+                    Atualizar tokens
                 </a>
-                <span class="text-gray-500 text-xs ml-3">Você será redirecionado para a página de login da Onfly e voltará aqui automaticamente.</span>
+                <span class="text-gray-500 text-xs ml-3">Execute <code class="text-yellow-300">node get_tokens.js</code> localmente e cole os tokens no formulário.</span>
             </div>
         </div>
     </div>
