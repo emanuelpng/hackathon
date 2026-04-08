@@ -20,7 +20,9 @@ return [
         'gateway_url'   => env('ONFLY_GATEWAY_URL', 'https://toguro-app-prod.onfly.com'),
         'client_id'     => env('ONFLY_CLIENT_ID', '1212'),
         'client_secret' => env('ONFLY_CLIENT_SECRET', 'fLWgKiTE4qmkx7pXwfEcTB7yNjKiisygEbbinWEV'),
-        'api_token'     => env('ONFLY_API_TOKEN', ''),
-        'refresh_token' => env('ONFLY_REFRESH_TOKEN', ''),
+        'api_token'        => env('ONFLY_API_TOKEN', ''),
+        'refresh_token'    => env('ONFLY_REFRESH_TOKEN', ''),
+        'traveler_id'      => env('ONFLY_TRAVELER_ID', '572178'),
+        'traveler_birthday' => env('ONFLY_TRAVELER_BIRTHDAY', '1990-01-01'),
     ],
 ];

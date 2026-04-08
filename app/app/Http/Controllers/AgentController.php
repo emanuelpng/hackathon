@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Models\AgentEvaluation;
+use App\Models\ApiCallLog;
 use App\Services\AgentService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -61,6 +62,30 @@ class AgentController extends Controller
         } catch (\Throwable $e) {
             return response()->json(['success' => false, 'error' => 'Erro interno ao processar a requisição.'], 500);
         }
+    }
+
+    /**
+     * GET /api/agent/api-logs
+     * Returns raw production API call history — proof of real Onfly API usage.
+     */
+    public function apiLogs(Request $request): JsonResponse
+    {
+        $logs = ApiCallLog::query()
+            ->latest()
+            ->limit(50)
+            ->get();
+
+        $summary = [
+            'total_calls'    => ApiCallLog::count(),
+            'successful'     => ApiCallLog::where('success', true)->count(),
+            'failed'         => ApiCallLog::where('success', false)->count(),
+            'avg_duration_ms' => (int) ApiCallLog::avg('duration_ms'),
+            'endpoints'      => ApiCallLog::selectRaw('endpoint, count(*) as calls, avg(duration_ms) as avg_ms')
+                ->groupBy('endpoint')
+                ->get(),
+        ];
+
+        return response()->json(['summary' => $summary, 'logs' => $logs]);
     }
 
     /**

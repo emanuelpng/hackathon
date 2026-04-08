@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Models\ApiCallLog;
+use App\Models\OnflyToken;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -39,12 +42,28 @@ class OnflyService
 
         // Build the correct nested structure required by /bff/quote/create
         if ($type === 'flight' && !isset($payload['flights'])) {
+            $travelerId = Cache::get('onfly_traveler_id', config('agent.onfly.traveler_id', '572178'));
+            $birthday   = Cache::get('onfly_traveler_birthday', config('agent.onfly.traveler_birthday', '1990-01-01'));
+
             $payload = [
                 'flights' => [[
-                    'origin'        => $searchParams['origin'] ?? $searchParams['originIata'] ?? null,
-                    'destination'   => $searchParams['destination'] ?? $searchParams['destinationIata'] ?? null,
-                    'departureDate' => $searchParams['date'] ?? $searchParams['departureDate'] ?? null,
-                    'adults'        => $searchParams['passengers'] ?? 1,
+                    'from'       => $searchParams['origin'] ?? $searchParams['from'] ?? null,
+                    'to'         => $searchParams['destination'] ?? $searchParams['to'] ?? null,
+                    'departure'  => $searchParams['date'] ?? $searchParams['departure'] ?? null,
+                    'cabinClass' => $searchParams['cabinClass'] ?? 'economy',
+                    'travelers'  => [['id' => $travelerId, 'birthday' => $birthday]],
+                ]],
+            ];
+        } elseif ($type === 'hotel' && !isset($payload['hotels'])) {
+            $travelerId = Cache::get('onfly_traveler_id', config('agent.onfly.traveler_id', '572178'));
+            $birthday   = Cache::get('onfly_traveler_birthday', config('agent.onfly.traveler_birthday', '1990-01-01'));
+
+            $payload = [
+                'hotels' => [[
+                    'destination' => $searchParams['destination'] ?? $searchParams['city'] ?? null,
+                    'checkIn'     => $searchParams['checkin'] ?? $searchParams['checkIn'] ?? null,
+                    'checkOut'    => $searchParams['checkout'] ?? $searchParams['checkOut'] ?? null,
+                    'travelers'   => [['id' => $travelerId, 'birthday' => $birthday]],
                 ]],
             ];
         }
@@ -55,7 +74,32 @@ class OnflyService
         $apiFallback = false;
 
         if (empty($data['error'])) {
-            $items = $data['items'] ?? $data['results'] ?? $data['data'] ?? [];
+            // Real BFF response: [{id, item, response: {data: [flights...]}}]
+            if (is_array($data) && isset($data[0]['response']['data'])) {
+                $raw = $data[0]['response']['data'] ?? [];
+                foreach ($raw as $flight) {
+                    $raw   = $flight['cheapestTotalPrice'] ?? $flight['cheapestPrice'] ?? null;
+                    if ($raw === null) continue;
+                    $price = round((float) $raw / 100, 2); // API returns cents
+                    $items[] = [
+                        'price'       => $price,
+                        'supplier'    => $flight['ciaManaging']['name'] ?? $flight['ciaManaging']['code'] ?? 'Unknown',
+                        'description' => sprintf(
+                            'Voo %s → %s | %s %s | %s parada(s)',
+                            $flight['from']['city']['name']   ?? ($flight['from']['id'] ?? 'GRU'),
+                            $flight['to']['city']['name']     ?? ($flight['to']['id'] ?? 'GIG'),
+                            $flight['ciaManaging']['code']    ?? '',
+                            $flight['flightNumber']           ?? '',
+                            $flight['stops']                  ?? 0
+                        ),
+                        'departure'   => $flight['departure']  ?? null,
+                        'arrival'     => $flight['arrival']    ?? null,
+                        'source'      => 'production',
+                    ];
+                }
+            } else {
+                $items = $data['items'] ?? $data['results'] ?? $data['data'] ?? [];
+            }
         }
 
         // Fallback: generate synthetic alternatives if API returned no results
@@ -141,8 +185,10 @@ class OnflyService
             return $cached;
         }
 
-        // Read refresh token from cache (updated after each use) or fall back to env
-        $refreshToken = Cache::get('onfly_refresh_token', config('agent.onfly.refresh_token', ''));
+        // Read refresh token: cache → DB (survives cache:clear) → env
+        $refreshToken = Cache::get('onfly_refresh_token')
+            ?? $this->dbTokenGet('refresh_token')
+            ?? config('agent.onfly.refresh_token', '');
 
         if (empty($refreshToken)) {
             Log::error('Onfly: nenhum refresh token disponível');
@@ -151,6 +197,7 @@ class OnflyService
 
         $response = Http::asJson()
             ->acceptJson()
+            ->withOptions($this->proxyOptions())
             ->post(config('agent.onfly.api_url') . '/oauth/token', [
                 'grant_type'    => 'refresh_token',
                 'refresh_token' => $refreshToken,
@@ -174,9 +221,10 @@ class OnflyService
         // which only accepts recently-issued tokens (~15 min window)
         Cache::put('onfly_api_token', $token, 840);
 
-        // Rotating refresh tokens: persist the new one for next cycle
+        // Rotating refresh tokens: persist in both cache AND DB so cache:clear doesn't break auth
         if (!empty($data['refresh_token'])) {
             Cache::put('onfly_refresh_token', $data['refresh_token'], 86400 * 30);
+            $this->dbTokenPut('refresh_token', $data['refresh_token']);
         }
 
         return $token;
@@ -199,6 +247,7 @@ class OnflyService
 
         $response = Http::withToken($apiToken)
             ->accept('application/prs.onfly.v1+json')
+            ->withOptions($this->proxyOptions())
             ->get(config('agent.onfly.api_url') . '/auth/token/internal');
 
         if (!$response->successful()) {
@@ -214,10 +263,18 @@ class OnflyService
 
         Cache::put('onfly_gateway_token', $token, 840); // 14 min
 
-        // Store gateway refresh token (30-day validity) for mid-cycle refreshes
         if (!empty($data['refreshToken'])) {
             Cache::put('onfly_gateway_refresh_token', $data['refreshToken'], 86400 * 30);
         }
+
+        // Extract traveler id from gateway token scopes for quote searches
+        try {
+            $payload = json_decode(base64_decode(explode('.', $token)[1]), true);
+            $userId  = $payload['user_id'] ?? $payload['scopes']['User']['id'] ?? null;
+            if ($userId) {
+                Cache::put('onfly_traveler_id', (string) $userId, 86400 * 30);
+            }
+        } catch (\Throwable) {}
 
         return $token;
     }
@@ -261,6 +318,7 @@ class OnflyService
 
     private function gateway(string $method, string $path, array $body = []): array
     {
+        $start = microtime(true);
         try {
             $token    = $this->getGatewayToken();
             $response = $this->gatewayRequest($method, $path, $body, $token);
@@ -271,8 +329,13 @@ class OnflyService
                 $response = $this->gatewayRequest($method, $path, $body, $token);
             }
 
+            $duration = (int) ((microtime(true) - $start) * 1000);
+            $json     = $response->json();
+
+            $this->logApiCall($method, $path, $body, $response->status(), $json, $response->body(), $response->successful(), $duration);
+
             if ($response->successful()) {
-                return $response->json() ?? [];
+                return $json ?? [];
             }
 
             Log::warning("Onfly gateway {$method} {$path} falhou ({$response->status()})", [
@@ -281,8 +344,29 @@ class OnflyService
 
             return ['error' => true, 'message' => "Gateway retornou {$response->status()}"];
         } catch (\Throwable $e) {
+            $duration = (int) ((microtime(true) - $start) * 1000);
             Log::error("Onfly gateway erro: {$e->getMessage()}");
+            $this->logApiCall($method, $path, $body, null, null, $e->getMessage(), false, $duration);
             return ['error' => true, 'message' => $e->getMessage()];
+        }
+    }
+
+    private function logApiCall(string $method, string $endpoint, array $payload, ?int $status, ?array $jsonResponse, ?string $rawResponse, bool $success, int $durationMs): void
+    {
+        try {
+            ApiCallLog::create([
+                'service'          => 'onfly',
+                'method'           => strtoupper($method),
+                'endpoint'         => $endpoint,
+                'status_code'      => $status,
+                'request_payload'  => empty($payload) ? null : $payload,
+                'response_body'    => $jsonResponse,
+                'response_raw'     => $jsonResponse ? null : $rawResponse,
+                'success'          => $success,
+                'duration_ms'      => $durationMs,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('ApiCallLog: falha ao salvar: ' . $e->getMessage());
         }
     }
 
@@ -290,8 +374,9 @@ class OnflyService
     {
         $http = Http::withToken($token)
             ->acceptJson()
-            ->timeout(15)
-            ->baseUrl(config('agent.onfly.gateway_url'));
+            ->timeout(30)
+            ->baseUrl(config('agent.onfly.gateway_url'))
+            ->withOptions($this->proxyOptions());
 
         return match(strtoupper($method)) {
             'POST'  => $http->post($path, $body),
@@ -299,5 +384,70 @@ class OnflyService
             'PATCH' => $http->patch($path, $body),
             default => $http->get($path),
         };
+    }
+
+    // ── DB-backed token persistence ──────────────────────────────
+
+    /**
+     * Reads a token value from the onfly_tokens table.
+     * Returns null if the key doesn't exist or has expired.
+     */
+    private function dbTokenGet(string $key): ?string
+    {
+        try {
+            $record = OnflyToken::find($key);
+            if (!$record) {
+                return null;
+            }
+            if ($record->expires_at && $record->expires_at->isPast()) {
+                $record->delete();
+                return null;
+            }
+            return $record->value;
+        } catch (\Throwable $e) {
+            Log::warning("OnflyToken: falha ao ler '{$key}': " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Writes a token value to the onfly_tokens table (upsert).
+     * $ttl is in seconds; null means no expiry.
+     */
+    private function dbTokenPut(string $key, string $value, ?int $ttl = null): void
+    {
+        try {
+            OnflyToken::updateOrCreate(
+                ['key' => $key],
+                [
+                    'value'      => $value,
+                    'expires_at' => $ttl ? now()->addSeconds($ttl) : null,
+                ]
+            );
+        } catch (\Throwable $e) {
+            Log::warning("OnflyToken: falha ao salvar '{$key}': " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Builds Guzzle proxy options from environment variables.
+     * Guzzle does not auto-read HTTPS_PROXY in PHP-FPM/artisan-serve contexts.
+     */
+    private function proxyOptions(): array
+    {
+        $proxy = env('HTTPS_PROXY') ?: env('HTTP_PROXY');
+        if (!$proxy) {
+            return [];
+        }
+
+        $options = ['proxy' => ['https' => $proxy, 'http' => $proxy]];
+
+        // Use system CA bundle (includes HTTP Toolkit cert injected at startup)
+        $caBundle = env('CURL_CA_BUNDLE');
+        if ($caBundle && file_exists($caBundle)) {
+            $options['verify'] = $caBundle;
+        }
+
+        return $options;
     }
 }
