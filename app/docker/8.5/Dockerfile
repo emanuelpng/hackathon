@@ -87,6 +87,10 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY php.ini /etc/php/8.5/cli/conf.d/99-sail.ini
 RUN chmod +x /usr/local/bin/start-container
 
+# HTTP Toolkit CA — allows intercepting HTTPS traffic for debugging
+COPY http-toolkit-ca.crt /usr/local/share/ca-certificates/http-toolkit-ca.crt
+RUN update-ca-certificates
+
 EXPOSE 80/tcp
 
 ENTRYPOINT ["start-container"]

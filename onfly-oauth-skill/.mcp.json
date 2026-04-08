@@ -2,7 +2,7 @@
   "mcpServers": {
     "onfly": {
       "command": "node",
-      "args": ["/home/lucasemanuel/projects/hackathon/onfly-oauth-skill/mcp-server.js"]
+      "args": ["/home/andreribeiro/projects/hackathon/onfly-oauth-skill/mcp-server.js"]
     }
   }
 }
