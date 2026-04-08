@@ -6,21 +6,22 @@ RUN apk add --no-cache \
     supervisor \
     curl \
     zip unzip \
-    libpng-dev libjpeg-dev libwebp-dev \
+    libpng-dev jpeg-dev libwebp-dev \
     oniguruma-dev \
     libxml2-dev \
     mysql-client \
     nodejs npm
 
 # PHP extensions
-RUN docker-php-ext-install \
-    pdo_mysql \
-    mbstring \
-    exif \
-    pcntl \
-    bcmath \
-    gd \
-    opcache
+RUN docker-php-ext-configure gd --with-jpeg --with-webp \
+    && docker-php-ext-install \
+        pdo_mysql \
+        mbstring \
+        exif \
+        pcntl \
+        bcmath \
+        gd \
+        opcache
 
 # Redis extension
 RUN apk add --no-cache autoconf g++ make \
