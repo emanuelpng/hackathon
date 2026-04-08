@@ -15,14 +15,16 @@ class AgentService
         private readonly OnflyService $onfly,
     ) {}
 
-    /**
-     * Avalia uma reserva e decide se aprova, rejeita ou encaminha para revisão.
-     *
-     * @return array{decision: string, reason: string, alternative: array|null, savings: float|null}
-     */
-    public function evaluate(array $reservation, ?string $prompt = null, ?float $budget = null): array
-    {
-        $budget ??= (float) config('agent.approval.default_budget', 1000.0);
+    public function evaluate(
+        array $reservation,
+        ?string $prompt = null,
+        ?float $budget = null,
+        ?float $autoApproveThreshold = null,
+        ?float $rejectThreshold = null,
+    ): array {
+        $budget               ??= (float) config('agent.approval.default_budget', 1000.0);
+        $autoApproveThreshold ??= (float) config('agent.approval.auto_approve_threshold', 0.10);
+        $rejectThreshold      ??= (float) config('agent.approval.reject_if_savings_above', 0.20);
 
         $decision = [
             'decision'     => 'needs_review',
@@ -30,18 +32,19 @@ class AgentService
             'alternative'  => null,
             'savings'      => null,
             'api_fallback' => false,
+            'trace'        => [],
         ];
 
         Log::info('Agente: iniciando avaliação', [
             'reservation_id' => $reservation['id'] ?? null,
-            'type' => $reservation['type'] ?? null,
-            'budget' => $budget,
+            'type'           => $reservation['type'] ?? null,
+            'budget'         => $budget,
         ]);
 
         $runner = $this->anthropic->beta->messages->toolRunner(
             model: config('agent.anthropic.model', 'claude-opus-4-6'),
             maxTokens: (int) config('agent.anthropic.max_tokens', 16000),
-            messages: $this->buildMessages($reservation, $prompt, $budget),
+            messages: $this->buildMessages($reservation, $prompt, $budget, $autoApproveThreshold, $rejectThreshold),
             tools: $this->buildTools($reservation, $budget, $decision),
         );
 
@@ -49,11 +52,25 @@ class AgentService
             foreach ($message->content as $block) {
                 if ($block->type === 'text' && !empty(trim($block->text))) {
                     Log::debug('Agente: ' . $block->text);
+                    $decision['trace'][] = [
+                        'type' => 'thinking',
+                        'text' => trim($block->text),
+                        'at'   => now()->toDateTimeString(),
+                    ];
+                }
+                if ($block->type === 'tool_use') {
+                    // Record the model's intent to call a tool (before execution)
+                    $decision['trace'][] = [
+                        'type'  => 'tool_use',
+                        'tool'  => $block->name,
+                        'input' => (array) $block->input,
+                        'at'    => now()->toDateTimeString(),
+                    ];
                 }
             }
         }
 
-        Log::info('Agente: decisão', $decision);
+        Log::info('Agente: decisão', array_diff_key($decision, ['trace' => null]));
 
         return $decision;
     }
@@ -65,15 +82,15 @@ class AgentService
         return [
             new BetaRunnableTool(
                 definition: [
-                    'name' => 'get_reservation_quote',
-                    'description' => 'Busca a cotação atual da reserva na Onfly. Retorna preço, fornecedor e detalhes.',
+                    'name'         => 'get_reservation_quote',
+                    'description'  => 'Busca a cotação atual da reserva na Onfly. Retorna preço, fornecedor e detalhes.',
                     'input_schema' => [
-                        'type' => 'object',
+                        'type'       => 'object',
                         'properties' => [
                             'reservation_id' => ['type' => 'string', 'description' => 'ID da reserva'],
-                            'type' => [
-                                'type' => 'string',
-                                'enum' => ['flight', 'hotel', 'car', 'bus'],
+                            'type'           => [
+                                'type'        => 'string',
+                                'enum'        => ['flight', 'hotel', 'car', 'bus'],
                                 'description' => 'Tipo da reserva',
                             ],
                         ],
@@ -82,38 +99,54 @@ class AgentService
                 ],
                 run: function (array $input) use ($onfly, $reservation, &$decision): string {
                     Log::info('Tool: get_reservation_quote', $input);
-                    $result = $onfly->getBooking($input['reservation_id']);
-                    if (!empty($result['error'])) {
-                        Log::info('Tool: get_reservation_quote fallback to provided data');
+
+                    $output = $onfly->getBookingOrMock(
+                        $input['reservation_id'],
+                        $reservation['type'],
+                        $reservation['data'] ?? [],
+                    );
+
+                    $source = match(true) {
+                        !empty($output['mocked']) => 'mock',
+                        default                  => 'api',
+                    };
+
+                    if ($source === 'mock') {
                         $decision['api_fallback'] = true;
-                        return json_encode(array_merge(
-                            ['source' => 'provided_data', 'id' => $reservation['id']],
-                            $reservation['data'] ?? []
-                        ));
                     }
-                    return json_encode($result);
+
+                    $decision['trace'][] = [
+                        'type'   => 'tool_result',
+                        'tool'   => 'get_reservation_quote',
+                        'input'  => $input,
+                        'output' => $output,
+                        'source' => $source,
+                        'at'     => now()->toDateTimeString(),
+                    ];
+
+                    return json_encode($output);
                 },
             ),
 
             new BetaRunnableTool(
                 definition: [
-                    'name' => 'search_cheaper_alternatives',
-                    'description' => 'Busca alternativas mais baratas na Onfly usando os mesmos parâmetros da reserva.',
+                    'name'         => 'search_cheaper_alternatives',
+                    'description'  => 'Busca alternativas mais baratas na Onfly usando os mesmos parâmetros da reserva.',
                     'input_schema' => [
-                        'type' => 'object',
+                        'type'       => 'object',
                         'properties' => [
-                            'type' => [
-                                'type' => 'string',
-                                'enum' => ['flight', 'hotel', 'car', 'bus'],
+                            'type'          => [
+                                'type'        => 'string',
+                                'enum'        => ['flight', 'hotel', 'car', 'bus'],
                                 'description' => 'Tipo da reserva',
                             ],
                             'search_params' => [
-                                'type' => 'object',
-                                'description' => 'Parâmetros de busca (origem, destino, datas, passageiros, etc.)',
+                                'type'                 => 'object',
+                                'description'          => 'Parâmetros de busca (origem, destino, datas, passageiros, etc.)',
                                 'additionalProperties' => true,
                             ],
                             'current_price' => [
-                                'type' => 'number',
+                                'type'        => 'number',
                                 'description' => 'Preço atual para comparação',
                             ],
                         ],
@@ -127,30 +160,38 @@ class AgentService
                         $input['search_params'],
                         (float) $input['current_price'],
                     );
+
                     if (!empty($result['api_fallback'])) {
                         $decision['api_fallback'] = true;
                     }
+
+                    $decision['trace'][] = [
+                        'type'        => 'tool_result',
+                        'tool'        => 'search_cheaper_alternatives',
+                        'input'       => $input,
+                        'output'      => $result,
+                        'source'      => $result['api_fallback'] ? 'simulated' : 'api',
+                        'at'          => now()->toDateTimeString(),
+                    ];
+
                     return json_encode($result);
                 },
             ),
 
             new BetaRunnableTool(
                 definition: [
-                    'name' => 'make_decision',
-                    'description' => 'Registra a decisão final. SEMPRE deve ser chamada ao fim da análise.',
+                    'name'         => 'make_decision',
+                    'description'  => 'Registra a decisão final. SEMPRE deve ser chamada ao fim da análise.',
                     'input_schema' => [
-                        'type' => 'object',
+                        'type'       => 'object',
                         'properties' => [
-                            'decision' => [
-                                'type' => 'string',
-                                'enum' => ['approved', 'rejected', 'needs_review'],
-                            ],
-                            'reason' => ['type' => 'string'],
+                            'decision'    => ['type' => 'string', 'enum' => ['approved', 'rejected', 'needs_review']],
+                            'reason'      => ['type' => 'string'],
                             'alternative' => [
-                                'type' => ['object', 'null'],
+                                'type'       => ['object', 'null'],
                                 'properties' => [
-                                    'supplier' => ['type' => 'string'],
-                                    'price' => ['type' => 'number'],
+                                    'supplier'    => ['type' => 'string'],
+                                    'price'       => ['type' => 'number'],
                                     'description' => ['type' => 'string'],
                                 ],
                             ],
@@ -160,20 +201,29 @@ class AgentService
                     ],
                 ],
                 run: function (array $input) use (&$decision): string {
-                    $decision['decision'] = $input['decision'];
-                    $decision['reason'] = $input['reason'];
+                    $decision['decision']    = $input['decision'];
+                    $decision['reason']      = $input['reason'];
                     $decision['alternative'] = $input['alternative'] ?? null;
-                    $decision['savings'] = isset($input['savings']) ? (float) $input['savings'] : null;
+                    $decision['savings']     = isset($input['savings']) ? (float) $input['savings'] : null;
+
+                    $decision['trace'][] = [
+                        'type'     => 'tool_result',
+                        'tool'     => 'make_decision',
+                        'input'    => $input,
+                        'output'   => ['recorded' => true],
+                        'at'       => now()->toDateTimeString(),
+                    ];
+
                     return json_encode(['recorded' => true]);
                 },
             ),
         ];
     }
 
-    private function buildMessages(array $reservation, ?string $prompt, float $budget): array
+    private function buildMessages(array $reservation, ?string $prompt, float $budget, float $autoApproveThreshold, float $rejectThreshold): array
     {
-        $autoApprovePercent = (int) (config('agent.approval.auto_approve_threshold', 0.10) * 100);
-        $rejectPercent = (int) (config('agent.approval.reject_if_savings_above', 0.20) * 100);
+        $autoApprovePercent = (int) ($autoApproveThreshold * 100);
+        $rejectPercent      = (int) ($rejectThreshold * 100);
 
         $system = <<<PROMPT
 Você é um agente de IA especializado em aprovar ou rejeitar reservas de viagens corporativas da Onfly.

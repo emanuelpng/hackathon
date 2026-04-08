@@ -20,6 +20,7 @@ class AgentEvaluation extends Model
         'savings',
         'savings_percentage',
         'api_fallback',
+        'trace',
     ];
 
     protected $casts = [
@@ -30,5 +31,6 @@ class AgentEvaluation extends Model
         'savings'          => 'float',
         'savings_percentage' => 'float',
         'api_fallback'     => 'boolean',
+        'trace'            => 'array',
     ];
 }

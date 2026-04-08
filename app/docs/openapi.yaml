@@ -1,0 +1,548 @@
+openapi: 3.0.3
+
+info:
+  title: Onfly AI Agent API
+  description: |
+    Agente de IA para aprovação automática de reservas de viagens corporativas.
+    O agente avalia reservas, busca alternativas mais baratas na Onfly e decide
+    se aprova, rejeita ou encaminha para revisão humana.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost
+    description: Local (Docker)
+
+tags:
+  - name: Agent
+    description: Avaliação de reservas pelo agente de IA
+  - name: History
+    description: Histórico de avaliações e logs de API
+
+paths:
+
+  /api/agent/evaluate:
+    post:
+      tags: [Agent]
+      summary: Avaliar uma reserva
+      description: |
+        Envia uma reserva para o agente de IA avaliar. O agente:
+        1. Busca os detalhes da reserva na Onfly (ou usa mock se não encontrada)
+        2. Busca alternativas mais baratas
+        3. Decide: `approved`, `rejected` ou `needs_review`
+
+        A resposta inclui o raciocínio completo do agente (campo `trace`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluateRequest'
+            examples:
+              voo_latam:
+                summary: Voo LATAM GRU → GIG
+                value:
+                  reservation:
+                    id: "6690003"
+                    type: flight
+                    data:
+                      price: 850.00
+                      origin: GRU
+                      destination: GIG
+                      date: "2026-05-15"
+                      airline: LATAM
+                  budget: 1000.00
+              hotel_sp:
+                summary: Hotel em São Paulo
+                value:
+                  reservation:
+                    id: "HTL-001"
+                    type: hotel
+                    data:
+                      price: 650.00
+                      hotel: "Ibis Paulista"
+                      destination: "São Paulo"
+                      checkin: "2026-05-15"
+                      checkout: "2026-05-17"
+                  budget: 500.00
+                  reject_threshold: 0.15
+                  prompt: "Priorize hotéis com café da manhã incluído."
+              regras_customizadas:
+                summary: Com regras customizadas
+                value:
+                  reservation:
+                    id: "FLT-999"
+                    type: flight
+                    data:
+                      price: 1200.00
+                      origin: GRU
+                      destination: BSB
+                      date: "2026-05-20"
+                      airline: Gol
+                  budget: 1500.00
+                  auto_approve_threshold: 0.05
+                  reject_threshold: 0.10
+                  prompt: "Viagem urgente, priorize voos com menos escalas."
+      responses:
+        '200':
+          description: Avaliação concluída com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluateResponse'
+              examples:
+                rejected:
+                  summary: Reserva rejeitada (alternativa mais barata encontrada)
+                  value:
+                    success: true
+                    data:
+                      decision: rejected
+                      reason: "Reserva rejeitada: alternativa 60,6% mais barata encontrada. Gol G3 1376 (GRU→GIG, 13:05→14:10, direto) por R$ 334,87."
+                      alternative:
+                        supplier: Gol
+                        price: 334.87
+                        description: "Voo São Paulo → Rio de Janeiro | G3 1376 | Direto | 15/05/2026 13:05→14:10"
+                      savings: 515.13
+                      api_fallback: false
+                approved:
+                  summary: Reserva aprovada
+                  value:
+                    success: true
+                    data:
+                      decision: approved
+                      reason: "Reserva aprovada: preço dentro do orçamento e sem alternativa com economia relevante."
+                      alternative: null
+                      savings: null
+                      api_fallback: false
+                needs_review:
+                  summary: Encaminhado para revisão humana
+                  value:
+                    success: true
+                    data:
+                      decision: needs_review
+                      reason: "Reserva acima do orçamento e sem alternativas disponíveis. Requer aprovação manual."
+                      alternative: null
+                      savings: null
+                      api_fallback: false
+        '422':
+          description: Dados inválidos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '500':
+          description: Erro interno do agente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/agent/evaluations:
+    get:
+      tags: [History]
+      summary: Listar histórico de avaliações
+      description: Retorna avaliações paginadas com resumo agregado. Útil para relatórios e dashboards.
+      parameters:
+        - name: decision
+          in: query
+          required: false
+          description: Filtrar por decisão
+          schema:
+            type: string
+            enum: [approved, rejected, needs_review]
+          example: rejected
+        - name: type
+          in: query
+          required: false
+          description: Filtrar por tipo de reserva
+          schema:
+            type: string
+            enum: [flight, hotel, car, bus]
+          example: flight
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+      responses:
+        '200':
+          description: Lista de avaliações
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationsListResponse'
+              example:
+                summary:
+                  total: 42
+                  approved: 18
+                  rejected: 20
+                  needs_review: 4
+                  total_savings: 9847.50
+                evaluations:
+                  current_page: 1
+                  per_page: 20
+                  total: 42
+                  data:
+                    - id: 1
+                      reservation_id: "6690003"
+                      reservation_type: flight
+                      reservation_price: 850.00
+                      budget: 1000.00
+                      decision: rejected
+                      reason: "Alternativa 60,6% mais barata encontrada."
+                      savings: 515.13
+                      savings_percentage: 60.6
+                      api_fallback: false
+                      alternative:
+                        supplier: Gol
+                        price: 334.87
+                        description: "Voo GRU → GIG | G3 1376 | Direto"
+                      created_at: "2026-04-08T17:52:30Z"
+
+  /api/agent/api-logs:
+    get:
+      tags: [History]
+      summary: Logs de chamadas à API Onfly
+      description: |
+        Retorna as últimas 50 chamadas feitas pelo agente às APIs da Onfly
+        (`api.onfly.com` e `toguro-app-prod.onfly.com`), com payload completo
+        de request e response. Útil para auditoria e debug.
+      responses:
+        '200':
+          description: Logs de API
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiLogsResponse'
+              example:
+                summary:
+                  total_calls: 87
+                  successful: 74
+                  failed: 13
+                  avg_duration_ms: 940
+                  endpoints:
+                    - endpoint: /bff/quote/create
+                      calls: 42
+                      avg_ms: 897
+                    - endpoint: /bff/booking/show
+                      calls: 21
+                      avg_ms: 623
+                logs:
+                  - id: 87
+                    service: onfly
+                    method: POST
+                    endpoint: /bff/quote/create
+                    status_code: 200
+                    success: true
+                    duration_ms: 7785
+                    request_payload:
+                      flights:
+                        - from: GRU
+                          to: GIG
+                          departure: "2026-05-15"
+                          cabinClass: economy
+                    response_body:
+                      - id: "c2869312-d9ef-4ea8-9a1c-7ec52310fce1"
+                        response:
+                          data:
+                            - cheapestTotalPrice: 33487
+                    created_at: "2026-04-08T17:52:15Z"
+
+components:
+  schemas:
+
+    EvaluateRequest:
+      type: object
+      required: [reservation]
+      properties:
+        reservation:
+          type: object
+          required: [id, type, data]
+          properties:
+            id:
+              type: string
+              description: ID da reserva no sistema Onfly. Se não existir, um mock realista é gerado automaticamente.
+              example: "6690003"
+            type:
+              type: string
+              enum: [flight, hotel, car, bus]
+              description: Tipo da reserva
+              example: flight
+            data:
+              type: object
+              description: |
+                Dados da reserva. Campos variam por tipo:
+
+                **flight:** `price`, `origin`, `destination`, `date`, `airline`, `cabinClass`, `stops`
+
+                **hotel:** `price`, `hotel`, `destination`, `checkin`, `checkout`, `nights`, `room_type`
+
+                **car:** `price`, `supplier`, `origin`, `destination`, `date`, `return_date`, `days`, `category`
+
+                **bus:** `price`, `company`, `origin`, `destination`, `date`, `seat_class`
+              example:
+                price: 850.00
+                origin: GRU
+                destination: GIG
+                date: "2026-05-15"
+                airline: LATAM
+        budget:
+          type: number
+          format: float
+          description: "Orçamento disponível em R$. Default: 1000.00"
+          example: 1000.00
+        auto_approve_threshold:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: |
+            Fração máxima de economia para aprovar automaticamente sem buscar alternativas.
+            Ex: `0.10` = aprova se não houver alternativa >10% mais barata. Default: 0.10
+          example: 0.10
+        reject_threshold:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: |
+            Fração mínima de economia para rejeitar automaticamente.
+            Ex: `0.20` = rejeita se houver alternativa >20% mais barata. Default: 0.20
+          example: 0.20
+        prompt:
+          type: string
+          maxLength: 1000
+          description: "Instrução adicional em linguagem natural para o agente. Sobrepõe o comportamento padrão."
+          example: "Priorize voos diretos. Evite companhias low-cost."
+
+    EvaluateResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            decision:
+              type: string
+              enum: [approved, rejected, needs_review]
+              description: |
+                - `approved`: dentro do orçamento, sem alternativa relevante
+                - `rejected`: alternativa mais barata encontrada acima do threshold
+                - `needs_review`: acima do orçamento sem alternativas ou situação especial
+            reason:
+              type: string
+              description: Justificativa detalhada do agente em português
+              example: "Reserva rejeitada: alternativa 60,6% mais barata encontrada."
+            alternative:
+              nullable: true
+              type: object
+              properties:
+                supplier:
+                  type: string
+                  example: Gol
+                price:
+                  type: number
+                  format: float
+                  example: 334.87
+                description:
+                  type: string
+                  example: "Voo São Paulo → Rio de Janeiro | G3 1376 | Direto | 13:05→14:10"
+            savings:
+              type: number
+              format: float
+              nullable: true
+              description: Valor economizado em R$ caso haja alternativa
+              example: 515.13
+            api_fallback:
+              type: boolean
+              description: |
+                `true` quando algum dado veio de mock (reserva não encontrada na Onfly)
+                ou quando a busca de cotações usou dados simulados.
+            trace:
+              type: array
+              description: Raciocínio passo-a-passo do agente (para debug e auditoria)
+              items:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum: [thinking, tool_use, tool_result]
+                  tool:
+                    type: string
+                    enum: [get_reservation_quote, search_cheaper_alternatives, make_decision]
+                  input:
+                    type: object
+                  output:
+                    type: object
+                  source:
+                    type: string
+                    enum: [api, mock, simulated]
+                  text:
+                    type: string
+                    description: Presente apenas em steps do tipo `thinking`
+                  at:
+                    type: string
+                    format: date-time
+
+    EvaluationsListResponse:
+      type: object
+      properties:
+        summary:
+          type: object
+          properties:
+            total:
+              type: integer
+            approved:
+              type: integer
+            rejected:
+              type: integer
+            needs_review:
+              type: integer
+            total_savings:
+              type: number
+              format: float
+        evaluations:
+          type: object
+          properties:
+            current_page:
+              type: integer
+            per_page:
+              type: integer
+            total:
+              type: integer
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/EvaluationRecord'
+
+    EvaluationRecord:
+      type: object
+      properties:
+        id:
+          type: integer
+        reservation_id:
+          type: string
+        reservation_type:
+          type: string
+          enum: [flight, hotel, car, bus]
+        reservation_price:
+          type: number
+          format: float
+          nullable: true
+        budget:
+          type: number
+          format: float
+        decision:
+          type: string
+          enum: [approved, rejected, needs_review]
+        reason:
+          type: string
+        alternative:
+          nullable: true
+          type: object
+          properties:
+            supplier:
+              type: string
+            price:
+              type: number
+              format: float
+            description:
+              type: string
+        savings:
+          type: number
+          format: float
+          nullable: true
+        savings_percentage:
+          type: number
+          format: float
+          nullable: true
+        api_fallback:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    ApiLogsResponse:
+      type: object
+      properties:
+        summary:
+          type: object
+          properties:
+            total_calls:
+              type: integer
+            successful:
+              type: integer
+            failed:
+              type: integer
+            avg_duration_ms:
+              type: integer
+            endpoints:
+              type: array
+              items:
+                type: object
+                properties:
+                  endpoint:
+                    type: string
+                  calls:
+                    type: integer
+                  avg_ms:
+                    type: number
+        logs:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              service:
+                type: string
+                example: onfly
+              method:
+                type: string
+                enum: [GET, POST, PUT, PATCH, DELETE]
+              endpoint:
+                type: string
+              status_code:
+                type: integer
+                nullable: true
+              success:
+                type: boolean
+              duration_ms:
+                type: integer
+              request_payload:
+                type: object
+                nullable: true
+              response_body:
+                type: object
+                nullable: true
+              response_raw:
+                type: string
+                nullable: true
+              created_at:
+                type: string
+                format: date-time
+
+    ValidationError:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "The reservation.type field must be one of: flight, hotel, car, bus."
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "Erro interno ao processar a requisição."

@@ -22,12 +22,14 @@ class AgentController extends Controller
     public function evaluate(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'reservation'       => 'required|array',
-            'reservation.id'    => 'required|string',
-            'reservation.type'  => 'required|string|in:flight,hotel,car,bus',
-            'reservation.data'  => 'required|array',
-            'prompt'            => 'nullable|string|max:1000',
-            'budget'            => 'nullable|numeric|min:0',
+            'reservation'             => 'required|array',
+            'reservation.id'          => 'required|string',
+            'reservation.type'        => 'required|string|in:flight,hotel,car,bus',
+            'reservation.data'        => 'required|array',
+            'prompt'                  => 'nullable|string|max:1000',
+            'budget'                  => 'nullable|numeric|min:0',
+            'auto_approve_threshold'  => 'nullable|numeric|min:0|max:1',
+            'reject_threshold'        => 'nullable|numeric|min:0|max:1',
         ]);
 
         $budget = isset($validated['budget']) ? (float) $validated['budget'] : null;
@@ -37,6 +39,8 @@ class AgentController extends Controller
                 reservation: $validated['reservation'],
                 prompt: $validated['prompt'] ?? null,
                 budget: $budget,
+                autoApproveThreshold: isset($validated['auto_approve_threshold']) ? (float) $validated['auto_approve_threshold'] : null,
+                rejectThreshold: isset($validated['reject_threshold']) ? (float) $validated['reject_threshold'] : null,
             );
 
             AgentEvaluation::create([
@@ -54,6 +58,7 @@ class AgentController extends Controller
                         ? round(($result['savings'] / $validated['reservation']['data']['price']) * 100, 2)
                         : null),
                 'api_fallback'      => $result['api_fallback'] ?? false,
+                'trace'             => $result['trace'] ?? null,
             ]);
 
             return response()->json(['success' => true, 'data' => $result]);
